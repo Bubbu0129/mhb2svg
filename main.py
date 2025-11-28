@@ -1,15 +1,13 @@
-padding = 10
-stroke_width_ratio = 1
-
-import sys
 import json
 import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
+import argparse
+import tempfile
 
-def convert(input_path, output_path):
+def convert(input_path, output_path, padding, ratio):
     tree = ET.parse(input_path)
     root = tree.getroot()
 
@@ -24,7 +22,7 @@ def convert(input_path, output_path):
             width = 1.0
         else:
             width = float(width_str)
-        width *= stroke_width_ratio
+        width *= ratio
 
         points = ink.find('Points')
         if points is None:
@@ -54,7 +52,7 @@ def convert(input_path, output_path):
     viewbox_x = min_x - padding
     viewbox_y = min_y - padding
 
-    print(f"x from {min_x:.1f} to {max_x:.1f}, y from {min_y:.1f} to {max_y:.1f}")
+    print(f"{output_path}: X from {min_x:.1f} to {max_x:.1f}, Y from {min_y:.1f} to {max_y:.1f}")
 
     # Write to SVG
     with open(output_path, 'w') as f:
@@ -71,12 +69,11 @@ def extract_sid(url):
     query_params = urllib.parse.parse_qs(parsed_url.query)
     
     if 's_id' not in query_params:
-        raise ValueError("URL does not contain an 's_id' parameter.")
+        raise ValueError("URL does not contain the 's_id' parameter.")
     
     return query_params['s_id'][0]
 
 def fetch_file_url(sid):
-    """Requests the API to get the actual file download URL."""
     api_url = f"https://res.maxhub.com/v3/clientairdisk/api/share/v2/{sid}/resources.json"
     req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
     
@@ -84,67 +81,74 @@ def fetch_file_url(sid):
         data = json.loads(response.read().decode('utf-8'))
         if not data or 'url' not in data[0]:
             raise ValueError("API response did not contain the expected file URL.")
-        return data[0]['url']
 
-def download_and_extract(url, dst_folder):
-    """Downloads the file and unzips it into the destination folder."""
-    dst_path = Path(dst_folder)
-    dst_path.mkdir(parents=True, exist_ok=True)
-    
-    local_filename = dst_path / "source_archive.bin"
+    return data[0]['url']
+
+def download_archive(url, dst_path):
+    file_path = dst_path / "archive.mhb"
     
     try:
-        with urllib.request.urlopen(url) as response, local_filename.open('wb') as out_file:
-            out_file.write(response.read())
+        with urllib.request.urlopen(url) as response, file_path.open('wb') as f:
+            f.write(response.read())
     except Exception as e:
         raise RuntimeError(f"Failed to download file: {e}")
 
-    print("Unzipping archive...")
+    return file_path
+
+def extract_archive(file_path, dst_path):
     try:
-        with zipfile.ZipFile(local_filename, 'r') as zip_ref:
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
             zip_ref.extractall(dst_path)
     except zipfile.BadZipFile:
         raise RuntimeError("The downloaded file is not a valid zip archive.")
 
-def process_slides(temp_dir):
-    """Finds .xml files in tmp/Slides/ and converts them."""
-    slides_dir = Path(temp_dir) / "Slides"
-    
+    return
+
+def process_slides(src_path, padding, ratio):
+    slides_dir = src_path / "Slides"
     if not slides_dir.exists():
         print(f"Warning: {slides_dir} does not exist. Skipping conversion.")
         return
 
     xml_files = list(slides_dir.glob("*.xml"))
-    
     if not xml_files:
-        print("No .xml files found in Slides directory.")
+        print("No XML files found in Slides directory.")
         return
 
-    print(f"Found {len(xml_files)} XML files. processing...")
-
+    print(f"Found {len(xml_files)} XML files. Processing...")
     for xml_path in xml_files:
         output_path = f"{xml_path.stem}.svg"
-        convert(str(xml_path), output_path)
+        convert(str(xml_path), output_path, padding, ratio)
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-f', '--file', type=str, help='Path to .mhb file')
+    group.add_argument('-l', '--link', type=str, help='MAXHUB URL containing the s_id argument')
+
+    parser.add_argument('-p', '--padding', type=int, default=10, help='Padding size for .svg (integer)')
+    parser.add_argument('-r', '--ratio', type=float, default=1.0, help='Stoke width ratio (float)')
+
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        print(f"Usage: python {sys.argv[0]} <url>")
-        sys.exit(1)
+    args = parse_args()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+
+        if args.link:
+            sid = extract_sid(args.link)
+            print(f"Extracted SID: {sid}")
+            file_url = fetch_file_url(sid)
+            print(f"File URL: {file_url}")
+            file_path = download_archive(file_url, tmp_path)
+        else:
+            file_path = Path(args.file)
         
-    url = sys.argv[1]
-    tmp_dir = Path("tmp")
+        print("Unzipping archive...")
+        extract_archive(file_path, tmp_path)
 
-    # Step 1: Extract s_id
-    sid = extract_sid(url)
-    print(f"Extracted SID: {sid}")
-
-    # Step 2: Get File URL
-    file_url = fetch_file_url(sid)
-    print(f"File URL: {file_url}")
-
-    # Step 3: Download and Unzip
-    download_and_extract(file_url, tmp_dir)
-
-    # Step 4: Process XMLs
-    process_slides(tmp_dir)
+        process_slides(tmp_path, args.padding, args.ratio)
 
